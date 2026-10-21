@@ -1,0 +1,855 @@
+---
+title: "tr1"
+author: "Thomas Papp-Simon"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# load libs
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(SingleCellExperiment)
+library(qs)
+library(ggrepel)
+library(openxlsx)
+library(DoubletFinder)
+library(ggvenn)
+library(STACAS)
+source("scripts/use_functions_good.R")
+
+cols_cd4_celltype <- c("Naive" = "sienna", 
+          "Eomes+Prdm1+ TR1" = "#0c1af7",
+          "TFH" = "salmon", 
+          "TR1.1" = "#7CAE00", 
+          "TR1.2" = "#03BFC4", 
+          "Foxp3+TR1.2" = "darkorchid",
+          "Eomes+ TR1" = "goldenrod3",
+          "Undefined" = "grey50")
+```
+
+
+
+# Read in data from Immunosuppressors_Oct2026 and make QC plots
+```{r}
+# Read data and create list of Seurat objs
+is_obj_list <- load_seurat_objects(base_dir = "./data/Immunosuppressors/IS_Oct2026")
+is_obj_list
+# sample #_filtered_featured_bc_matrix
+# sample_ids <- str_replace(names(is_obj_list), 
+#   "^[^_]+_[^_]+_[^_]+_([^_]+)_[^_]+_([^_]+).*",
+#   "\\1_\\2")
+sample_ids <- names(is_obj_list)
+sample_ids
+is_merged <- merge(x = is_obj_list[[1]],
+                        y = is_obj_list[-1],
+                        add.cell.ids = sample_ids)
+
+is_merged_list <- list(is_merged)
+
+# General QC and make violin plots for objs
+is_merged_list <- generate_qc_vlnplots(is_merged_list, output_dir = "./figures/Immunosuppressors_Oct2026/QC", before_subset = TRUE, merged = TRUE)
+is_obj_list <- generate_qc_vlnplots(is_obj_list, output_dir = "./figures/Immunosuppressors_Oct2026/QC", before_subset = TRUE, merged = FALSE) # before subsetting
+
+is_obj_list_filt <- list()
+for (i in seq_along(is_obj_list)){
+  obj <- is_obj_list[[i]]
+  
+  name <- names(is_obj_list[i])
+  print(name)
+  print(paste0("Number of cells before subsetting in ",name ,": ", ncol(obj), " cells"))
+  obj <- subset(obj, subset = nCount_RNA < 20000 & percent.mt < 5 & nFeature_RNA < 5000 & nFeature_RNA > 500)
+  print(paste0("Number of cells after subsetting in ", name,": ", ncol(obj), " cells")) 
+  is_obj_list_filt[[i]] <- obj
+}
+
+is_merged_list_filt <- list()
+for (i in seq_along(is_merged_list)){
+  obj <- is_merged_list[[i]]
+  obj <- subset(obj, subset = nCount_RNA < 20000 & percent.mt < 5 & nFeature_RNA < 5000 & nFeature_RNA > 500)
+  is_merged_list_filt[[i]] <- obj
+}
+table(is_merged_list_filt[[1]]$sample_type)
+
+
+is_merged_list_filt <- generate_qc_vlnplots(is_merged_list_filt, output_dir = "./figures/Immunosuppressors_Oct2026/QC", before_subset = FALSE, merged = TRUE)
+is_obj_list_filt <- SplitObject(is_merged_list_filt[[1]], split.by = "sample_type")
+is_obj_list_filt <- generate_qc_vlnplots(is_obj_list_filt, output_dir = "./figures/Immunosuppressors_Oct2026/QC", before_subset = FALSE, merged = FALSE)
+```
+
+
+
+# Batch effect
+```{r}
+# is_merged <- is_merged_list[[1]]
+# 
+# is_merged <- JoinLayers(is_merged)
+# 
+# m.s.genes <- str_to_title(cc.genes.updated.2019$s.genes)
+# m.s.genes <- m.s.genes[m.s.genes %in% rownames(is_merged)]
+# m.g2m.genes <- str_to_title(cc.genes.updated.2019$g2m.genes)
+# m.g2m.genes <- m.g2m.genes[m.g2m.genes %in% rownames(is_merged)]
+# 
+#   # is_merged <- SCTransform(is_merged, vars.to.regress = "percent.mt")
+#   
+# is_merged <- NormalizeData(is_merged, normalization.method = "LogNormalize")
+# is_merged <- CellCycleScoring(is_merged, s.features = m.s.genes, g2m.features = m.g2m.genes)
+# is_merged <- FindVariableFeatures(is_merged, nfeatures = 2000)
+# is_merged <- ScaleData(is_merged, vars.to.regress = c("S.Score","G2M.Score","nFeature_RNA","percent.mt"))
+# is_merged <- RunPCA(is_merged)
+# is_merged <- RunUMAP(is_merged, dims = 1:30)
+# is_merged <- FindNeighbors(is_merged, dims = 1:30)
+# is_merged <- FindClusters(is_merged, resolution = 0.3)
+# 
+# is_merged$sample_type
+# DimPlot(is_merged, group.by = "sample_type")
+```
+
+
+# Processing (Normalize, scale, dim reduc)
+```{r}
+for (i in seq_along(is_obj_list_filt)) {
+    obj <- is_obj_list_filt[[i]]
+    cat("Processing", names(is_obj_list_filt[i]), "\n")
+    
+    m.s.genes <- str_to_title(cc.genes.updated.2019$s.genes)
+    m.s.genes <- m.s.genes[m.s.genes %in% rownames(obj)]
+    m.g2m.genes <- str_to_title(cc.genes.updated.2019$g2m.genes)
+    m.g2m.genes <- m.g2m.genes[m.g2m.genes %in% rownames(obj)]
+    
+    # obj <- SCTransform(obj, vars.to.regress = "percent.mt")
+    
+    obj <- NormalizeData(obj, normalization.method = "LogNormalize")
+    obj <- CellCycleScoring(obj, s.features = m.s.genes, g2m.features = m.g2m.genes)
+    obj <- FindVariableFeatures(obj, nfeatures = 2000)
+    obj <- ScaleData(obj, vars.to.regress = c("S.Score","G2M.Score","percent.mt"))
+    obj <- RunPCA(obj, npcs = 30)
+    obj <- RunUMAP(obj, dims = 1:30)
+    obj <- FindNeighbors(obj, dims = 1:30)
+    obj <- FindClusters(obj, resolution = 0.7)
+
+    is_obj_list_filt[[i]] <- obj
+}
+```
+
+
+# Find Doublets
+```{r}          
+
+for (seu in seq_along(is_obj_list_filt)) {
+  obj <- is_obj_list_filt[[seu]]
+  doublet_obj <- run_doubletfinder_custom(obj, used_sct = F, min_pc = 30)
+  doublet_obj <- doublet_obj[, doublet_obj@meta.data[["df_col"]] == "Singlet"] # filter doublets out
+  is_obj_list_filt[[seu]] <- doublet_obj
+}
+
+qsave(is_obj_list_filt, paste0("data/Immunosuppressors/IS_Oct2026/IS_unintegrated_doubletfinder_obj_list_", Sys.Date(),".qs"))
+```
+
+# Integration
+```{r}
+is_obj_list_filt <- qread("data/Immunosuppressors/IS_Oct2026/IS_unintegrated_doubletfinder_obj_list_2026-10-19.qs")
+
+features <- SelectIntegrationFeatures(object.list = is_obj_list_filt)
+anchors <- FindIntegrationAnchors(object.list = is_obj_list_filt, dims = 1:30)
+integrated <- IntegrateData(anchorset = anchors, dims = 1:30)
+
+# integrated <- Run.STACAS(is_obj_list_filt, anchor.features = 2000)
+
+integrated <- ScaleData(integrated, vars.to.regress = c("S.Score","G2M.Score","percent.mt"))
+integrated <- RunPCA(integrated, npcs = 30)
+integrated <- RunUMAP(integrated, dims = 1:30)
+integrated <- FindNeighbors(integrated, dims  = 1:30)
+integrated <- FindClusters(integrated, graph.name = "integrated_snn", resolution = 0.5) # changed it to 0.3
+
+# Change sample naming so it looks better in plots, and rename 236 as 236_Ctrl
+
+table(integrated$sample_type)
+
+# qsave(integrated, paste0("data/Immunosuppressors_Oct2026/STACAS_IS_integrated_lognorm_",Sys.Date(),".qs"))
+DefaultAssay(integrated) <- "RNA"
+integrated <- JoinLayers(integrated)
+qsave(integrated, paste0("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_",Sys.Date(),".qs"))
+
+rm(obj, anchors, doublet_obj, is_obj_list, is_obj_list_filt, is_merged, is_merged_list, is_merged_list_filt)
+gc()
+# int_cols <- c("9" = "red")
+# int_cols[setdiff(levels(integrated), "9")] <- "gray" 
+```
+
+# Initial look at markers and dimplot & annotation
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+integrated$sample_type <- factor(
+  integrated$sample_type,
+  levels = c(
+    "Control_1", "T1_Azathioprine",
+    "Control_2", "T2_Elafibranor",
+    "Control_3", "T3_MMF"
+  )
+)
+qsave(integrated, paste0("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs"))
+Idents(integrated) <- "seurat_clusters"
+
+umap <- DimPlot(integrated, split.by = "sample_type", ncol = 2, label = TRUE) 
+umap
+ggsave(paste0("figures/Immunosuppressors_Oct2026/UMAPs/unsupervised_integrated_umap_splitby_sample_lognorm_",Sys.Date(), ".svg"), umap, width = 15, height = 10)
+
+umap_notsplit <- DimPlot(integrated, label = T)
+umap_notsplit
+ggsave(paste0("figures/Immunosuppressors_Oct2026/UMAPs/unsupervised_integrated_umap_lognorm_",Sys.Date(), ".svg"), umap_notsplit, width = 15, height = 10)
+
+
+DefaultAssay(integrated) <- "RNA"
+sig <-  FindAllMarkers(integrated, 
+                      assay = "RNA",
+                      test.use = "wilcox", 
+                      slot = "data", 
+                      min.pct = 0.3,
+                      min.diff.pct = 0.2, 
+                      only.pos = TRUE)
+dir.create("output/Immunosuppressors_Oct2026/signature_markers", recursive = T)
+write.xlsx(sig, paste0("output/Immunosuppressors_Oct2026/signature_markers/IS_0.5_unsupervised_clusters_sig_markers_", Sys.Date(), ".xlsx"))
+
+FeaturePlot(integrated, features = c("Tk1"))
+
+```
+
+
+
+# Predictions
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+ref <- readRDS("/home/ps-lab/Documents/Transgenic_TCR_mice_project/scRNAseq/data/cd4_reference_core_datasets_integrated_2024-11-20.rds")
+
+DimPlot(ref, group.by = "pslab_idents")
+
+anchors <- FindTransferAnchors(reference = ref, query = integrated,
+                               normalization.method = "LogNormalize", features = rownames(ref))
+predictions <- TransferData(anchorset = anchors, refdata = ref$pslab_idents)
+integrated <- AddMetaData(integrated, metadata = predictions)
+integrated <- subset(integrated, !integrated$predicted.id == "Naive")
+qsave(integrated, paste0("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs"))
+
+table(atlas$tissue_sp)
+# prediction score density plot
+pred_score_density_plot <- ggplot(integrated@meta.data,aes(x = prediction.score.max, fill = predicted.id)) + geom_density(alpha = 0.5) + facet_wrap(.~predicted.id) + ggtitle(paste0("Cell types prediction scores"))
+pred_score_density_plot
+ggsave(filename = paste0("figures/Immunosuppressors_Oct2026/QC/integrated_prediction_score_densityplot.svg"), pred_score_density_plot, width = 15, height = 10)
+
+
+preds_umap <- DimPlot(integrated, group.by = "predicted.id", split.by = "sample_type", ncol = 2, label = TRUE, cols = cols_cd4_celltype)
+preds_umap
+ggsave(paste0("figures/Immunosuppressors_Oct2026/UMAPs/preds_integrated_umap_splitby_sample_lognorm_",Sys.Date(), ".svg"), preds_umap, width = 11, height = 10)
+
+
+# set low pred score as undefined
+# integrated$predicted.id[integrated$prediction.score.max < 0.3] <- "Undefined"
+# table(integrated$predicted.id)
+# 
+# preds_umap <- DimPlot(integrated, group.by = "predicted.id", split.by = "sample_type", ncol = 2, label = TRUE, cols = cols_cd4_celltype)
+# preds_umap
+# DefaultAssay(integrated) <- "RNA"
+# integrated
+# integrated <- JoinLayers(integrated)
+
+
+FeaturePlot(integrated, features = "Nrn1")
+```
+
+# subclustering (if needed)
+```{r}
+# try subclustering cluster 12
+integrated <- FindSubCluster(integrated, cluster = "12", graph.name = "integrated_snn", subcluster.name = "subclustered", resolution = 0.2)
+umap_all <- DimPlot(integrated, group.by = "subclustered", label = TRUE) 
+umap_all
+
+Idents(integrated) <- "subclustered"
+cl12_sub_de <- FindMarkers(integrated,
+                          assay = "RNA",
+                          slot = "data",
+                          logfc.threshold = 0.25,
+                          ident.1 = "12_0", # the test group
+                          ident.2 = "12_1", # the reference group
+                          test.use = "wilcox", 
+                          min.cells.group = 25,
+                          min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+                          only.pos = FALSE, 
+                          min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+                          ) %>% rownames_to_column("gene")
+
+
+# re-do findallmarkers for subsetted obj 
+Idents(integrated) <- "subclustered"
+sig <-  FindAllMarkers(integrated, 
+                      assay = "RNA",
+                      test.use = "wilcox", 
+                      slot = "data", 
+                      min.pct = 0.3,
+                      min.diff.pct = 0.2, 
+                      only.pos = TRUE)
+
+write.xlsx(sig, paste0("output/Immunosuppressors_Oct2026/signature_markers/subsetted_IS_subcl_0.8_unsupervised_clusters_sig_markers_", Sys.Date(), ".xlsx"))
+
+
+sig_1_vs_7 <- FindMarkers(integrated,
+                          assay = "RNA",
+                          slot = "data",
+                          logfc.threshold = 0.25,
+                          ident.1 = "1", # the test group
+                          ident.2 = "7", # the reference group
+                          test.use = "wilcox", 
+                          min.cells.group = 25,
+                          min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+                          only.pos = FALSE, 
+                          min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+                          ) %>% rownames_to_column("gene")
+
+
+
+# maybe consider subclustering cluster 12 tmrw
+integrated@meta.data$celltype <- dplyr::case_when(
+  integrated$subclustered %in% c("0","3","4","6", "15") ~ "TFH",
+  integrated$subclustered %in% c("1","2","5","7","14","16") ~ "TR1.1",
+  integrated$subclustered %in% c("8", "12_1") ~ "Eomes+ TR1",
+  integrated$subclustered %in% c("12_0") ~ "Eomes+Prdm1+ TR1",
+  integrated$subclustered %in% c("9", "10") ~ "TR1.2",
+  integrated$subclustered %in% c("13") ~ "Foxp3+ TR1.2",
+  TRUE ~ "Unknown"
+)
+Idents(integrated) <- "celltype"
+sig_TFH_vs_unknown <- FindMarkers(integrated,
+                          assay = "RNA",
+                          slot = "data",
+                          logfc.threshold = 0.25,
+                          ident.1 = "TFH", # the test group
+                          ident.2 = "Unknown", # the reference group
+                          test.use = "wilcox", 
+                          min.cells.group = 25,
+                          min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+                          only.pos = FALSE, 
+                          min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+                          ) %>% rownames_to_column("gene")
+annotated_umap <- DimPlot(integrated, group.by = "celltype", split.by = "sample_type", ncol = 2, label = F, cols = cols_cd4_celltype) 
+annotated_umap
+ggsave(paste0("figures/Immunosuppressors_Oct2026/UMAPs/annotated_integrated_umap_splitby_sample_lognorm_",Sys.Date(), ".svg"), annotated_umap, width = 12, height = 10)
+
+integrated <- subset(integrated, subset = !celltype %in% c("Unknown"))
+
+annotated_umap <- DimPlot(integrated, group.by = "celltype", split.by = "sample_type", ncol = 2, label = F, cols = cols_cd4_celltype) 
+annotated_umap
+ggsave(paste0("figures/Immunosuppressors_Oct2026/UMAPs/annotated_unknown_removed_integrated_umap_splitby_sample_lognorm_",Sys.Date(), ".svg"), annotated_umap, width = 12, height = 10)
+
+
+qsave(integrated, paste0("data/Immunosuppressors/Annotated_IS_subsetted_integrated_lognorm_",Sys.Date(),".qs"))
+
+Idents(integrated) <- "celltype"
+sig <-  FindAllMarkers(integrated, 
+                      assay = "RNA",
+                      test.use = "wilcox", 
+                      slot = "data", 
+                      min.pct = 0.3,
+                      min.diff.pct = 0.2, 
+                      only.pos = TRUE)
+write.xlsx(sig, paste0("output/Immunosuppressors_Oct2026/signature_markers/IS_annotated_clusters_sig_markers_", Sys.Date(), ".xlsx"))
+
+#####
+DefaultAssay(integrated) <- "RNA"
+FeaturePlot(integrated, features = c("Eomes"),label = T)
+FeaturePlot(integrated, features = c("Bcl6"),label = T)
+FeaturePlot(integrated, features = c("Foxp3"),label = T)
+FeaturePlot(integrated, features = c("Il10"),label = T)
+FeaturePlot(integrated, features = c("Prdm1"), label = T)
+FeaturePlot(integrated, features = c("Il2ra"),label = T)
+```
+# Feature plots of relevant genes
+```{r}
+my_genes <- c("Bcl6", "Eomes", "Foxp3", "Il7r", "Maf", "Prdm1", "Irf4", "Il10", "Il10ra")
+
+featplot_dir <- "figures/Immunosuppressors_Oct2026/Feature_plots/IS_Feature_Plots/"
+dir.create(featplot_dir ,recursive = TRUE)
+n_groups <- ceiling(length(my_genes) / 3)
+n_groups
+DefaultAssay(integrated) <- "RNA"
+for (i in 1:n_groups) {
+  start_idx <- (i-1)*3 + 1
+  end_idx <- min(i*3, length(my_genes))
+  current_genes <- my_genes[start_idx:end_idx]
+  plot_list <- list()
+  valid_genes <- c()  # Track genes that exist in the object
+  for (gene in current_genes) {
+    print(gene)
+    tryCatch({
+      plot_list[[gene]] <- FeaturePlot(integrated, features = gene, pt.size = 0.5, label = TRUE)
+      valid_genes <- c(valid_genes, gene) # Only add if successful
+      # print(valid_genes) 
+    }, error = function(e) {
+      message(paste("Skipping gene", gene, ":", e$message))
+    })
+  }
+  if (length(valid_genes) == 0) {
+    message("No valid genes in group ", i, ". Skipping.")
+    next
+  }
+  combined_plot <- patchwork::wrap_plots(plot_list[valid_genes], ncol = length(valid_genes))
+  genes_in_filename <- paste(valid_genes, collapse = "_")
+  ggsave(
+    paste0(featplot_dir, "feature_plot_", genes_in_filename, "_", Sys.Date(), ".svg"),
+    plot = combined_plot,
+    width = 8 * length(plot_list),
+    height = 9  ) 
+}
+
+
+
+```
+
+
+
+
+
+
+
+
+
+# Heatmap of all genes
+```{r}
+integrated <- qread("data/Immunosuppressors/Annotated_IS_subsetted_integrated_lognorm_2026-01-28.qs")
+dir.create("output/Immunosuppressors_Oct2026/Avg_Expr_heatmaps/")
+DefaultAssay(integrated) <- "RNA"
+is_int_list_all <- SplitObject(integrated,
+                              split.by = "sample_type")
+
+is_int_list_all
+# Average expression heatmap table for all genes for the 6 subsets (2026-01-21)
+
+for (seu in names(is_int_list_all)){
+  obj <- is_int_list_all[[seu]]
+  print(seu) 
+  Idents(obj) <- "celltype"
+  table(obj$celltype)
+  
+  # avg_expr <- AverageExpression(obj, return.seurat = TRUE, layer = "data") 
+  aggr_expr <- AggregateExpression(obj, return.seurat = T, slot = "data")
+  avg_data <- as.data.frame(aggr_expr[["RNA"]]$data) # data layer contains log normalized average expression values for each gene
+  
+  n_clusters <- ncol(avg_data)
+  
+  # grep("^Zfp68", rownames(obj), value = T, ignore.case = T)
+  # filter to only include genes expressed in more than 50% of the clusters and that have an average expression higher than 0.5
+  avg_data_filtered <- avg_data %>%
+    rownames_to_column("gene") %>%
+    # mutate(
+    #   num_clusters_expressed = rowSums(select(., -gene) > 0.5), # if expr is higher than 0.5, consider it as "expressed"
+    #   prct_clusters_expressed = paste0(((num_clusters_expressed / n_clusters)*100), "%"),
+    #   avg_expression = round(rowMeans(select(., -gene)),3)
+    # ) %>%
+    # mutate_at(vars(starts_with("Cluster")), ~(round(.,3))) %>%
+    # filter(frac_clusters_expressed >= 0.5 & avg_expression >= 1) %>%
+    mutate(across(-gene, ~ round(.x, 3))) %>%
+    filter(!grepl("^mt-|Rp", gene)) %>%
+    arrange(gene)
+  # reorder columns
+  avg_data_filtered <- avg_data_filtered[,c("gene", "TFH",  "TR1.1", "TR1.2","Foxp3+ TR1.2", "Eomes+ TR1", "Eomes+Prdm1+ TR1")]
+  # only run this for annotated clusters
+  # avg_data_filtered <- avg_data_filtered[,c("gene", "Cluster 1","Cluster 2","Cluster 3","Cluster 4","Cluster 5","Cluster 6","Cluster 7","Cluster 8",
+  #                                           "num_clusters_expressed", "prct_clusters_expressed", "avg_expression")]
+  
+  write.xlsx(avg_data_filtered, paste0("output/Immunosuppressors_Oct2026/Avg_Expr_heatmaps/",seu,"_Average_Expr_all_genes_",Sys.Date(),".xlsx"))
+}
+```
+
+
+
+# Proportion bar plots
+# Make bar plot with absolute number of cells in original sample 
+Get percentage of Tetpos cell types in my sample and then use these values to calculate the absolute number of Tetpos in the original samples
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+
+
+table(integrated$sample_type)
+table(integrated$predicted.id)
+# prop_df <- integrated@meta.data %>% as.data.frame() %>%
+#   group_by(celltype, sample_type) %>% summarise(N_cells = n()) %>%
+#   group_by(sample_type) %>% 
+#   filter(!celltype %in% c("Undefined")) %>%  
+#   mutate(Perc_cells = round(N_cells/sum(N_cells)*100, 2)) %>% # percentage in my sample
+#   arrange(sample_type) %>%
+#   mutate(Tet_pos_cell_count = case_when(
+#     sample_type == "Expt56_OX40L_10x" ~ 0.747813*10^5,
+#     sample_type == "Expt56_OX40L_4x" ~ 4.9933*10^5,
+#     sample_type == "Expt66_OX40L_10x" ~ 0.91*10^5,
+#     sample_type == "237_Bcl6Flox" ~ 0.05*10^5,
+#     sample_type == "238_Blimp1LoxP" ~ 1.46*10^5,
+#     sample_type == "239_Irf4LoxP" ~ 0.46*10^5,
+#     sample_type == "240_cMafLoxP" ~ 0.20*10^5,
+#   )) %>%
+#   mutate(N_cells_original = round((Perc_cells/100)*Tet_pos_cell_count)) %>%
+#   mutate(celltype = factor(celltype,
+#     levels = c("TFH","TR1.1","TR1.2","Foxp3+ TR1.2","Eomes+ TR1","Eomes+Prdm1+ TR1")
+#   )) %>%
+#   mutate(celltype = fct_rev(celltype))
+prop_df <- integrated@meta.data %>% as.data.frame() %>%
+  group_by(celltype, sample_type) %>% summarise(N_cells = n()) %>%
+  group_by(sample_type) %>% 
+  filter(!celltype %in% c("Unknown")) %>%  
+  mutate(Perc_cells = round(N_cells/sum(N_cells)*100, 2)) %>% # percentage in my sample
+  arrange(sample_type) %>%
+  mutate(celltype = factor(celltype,
+    levels = c("TFH","TR1.1","TR1.2","Foxp3+ TR1.2","Eomes+ TR1","Eomes+Prdm1+ TR1")
+  )) %>%
+  mutate(celltype = fct_rev(celltype))
+
+# write.xlsx(prop_df, "output/Expt56/tetpos_percentages.xlsx")
+# write.xlsx(prop_df, "output/Expt56/tetpos_percentages_no_TFR.xlsx")
+# View(prop_df)
+
+prop_plot <- ggplot(prop_df, aes(sample_type, N_cells, fill = celltype)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous(expand = c(0,0)) +
+  ggtitle(paste0("Immunosuppressed samples - Absolute Proportion Plot")) +
+  ylab("Single Cell Count") +
+  ggprism::theme_prism() +
+  theme(legend.position = "bottom", 
+        axis.title.x = element_blank(), axis.text.x = element_text(size = 10)) +
+  scale_fill_manual(values = cols_cd4_celltype, breaks = rev(levels(prop_df$celltype)))
+prop_plot
+
+ggsave(paste0("figures/Immunosuppressors_Oct2026/Prop_Bar_Plots/IS_Absolute_prop_barplot_",Sys.Date(),".svg"), prop_plot, width = 12, height = 10)
+```
+
+# Relative bar plot
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+table(integrated$sample_type)
+table(integrated$predicted.id)
+
+prop_df_rel <- integrated@meta.data %>% as.data.frame() %>%
+  group_by(predicted.id, sample_type) %>% summarise(N_cells = n()) %>%
+  group_by(sample_type) %>% 
+  filter(!predicted.id %in% c("Unknown")) %>%  
+  mutate(Perc_cells = round(N_cells/sum(N_cells)*100, 2)) %>% # percentage in my sample
+  arrange(sample_type) %>%
+  mutate(celltype = factor(predicted.id,
+    levels = c("TFH","TR1.1","TR1.2","Foxp3+TR1.2")
+  ))
+
+# write.xlsx(prop_df, "output/Expt56/tetpos_percentages.xlsx")
+# write.xlsx(prop_df, "output/Expt56/tetpos_percentages_no_TFR.xlsx")
+# View(prop_df)
+
+prop_plot_rel <- ggplot(prop_df_rel, aes(sample_type, Perc_cells, fill = celltype)) +
+  geom_bar(stat="identity", position = position_stack(reverse = TRUE)) +
+  scale_y_continuous(expand = c(0,0)) +
+  ggtitle(paste0("Immunosuppressed samples - Relative Proportion Plot")) +
+  ylab("Percentage") +
+  ggprism::theme_prism() +
+  theme(legend.position = "bottom", 
+        axis.title.x = element_blank(), axis.text.x = element_text(size = 12)) +
+  scale_fill_manual(values = cols_cd4_celltype, breaks = levels(prop_df_rel$celltype))
+prop_plot_rel
+
+ggsave(paste0("figures/Immunosuppressors_Oct2026/Prop_Bar_Plots/IS_Relative_prop_barplot_",Sys.Date(),".svg"), prop_plot_rel, width = 12, height = 10)
+```
+
+
+
+##### DE Analysis
+# Compare each cell type subset in the immunosuppressed sample to non-IS version? BDC vs BDC IS, BDC + OX40 vs BDC OX40 IS
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+DefaultAssay(integrated) <- "RNA"
+
+table(integrated$sample_type)
+comparisons <- list(
+  Azathioprine = c("T1_Azathioprine", "Control_1"),
+  Elafibranor = c("T2_Elafibranor", "Control_2"),
+  MMF = c("T3_MMF","Control_3")
+)
+
+Idents(integrated) <- "sample_type"
+for (ct in unique(integrated$predicted.id)){
+  message("Cell type: ", ct)
+  obj_ct <- integrated[, integrated$predicted.id == ct]
+
+  for (cmp in names(comparisons)){
+    group1 <- comparisons[[cmp]][1]  # treatment
+    group2 <- comparisons[[cmp]][2]  # ctrl
+    message("  Comparison: ", group1, " vs ", group2)
+    
+    markers <- tryCatch({
+                            FindMarkers(obj_ct,
+                            assay = "RNA",
+                            slot = "data",
+                            logfc.threshold = 0.5,
+                            ident.1 = group1, # ctrl
+                            ident.2 = group2, # treatment
+                            test.use = "wilcox", 
+                            min.cells.group = 25,
+                            min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+                            only.pos = FALSE, 
+                            min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+                            ) %>% rownames_to_column("gene")
+    },
+    error = function(e) {
+    message("  Failed for ", ct, " / ", cmp, ": ", e$message)
+    return(NULL)
+    })
+    if (is.null(markers)) next
+
+    # markers <- markers[order(markers$avg_log2FC, decreasing = TRUE),]
+    # write.csv(file = paste0("output/Expt56/",ct,"_between_samples/",ko,"vs_Cysko_10x_main_",ct,"_markers_between_samples_", Sys.Date(),".csv"),
+    #           markers)
+    # dir.create("output/Immunosuppressors_Oct2026/DE_analysis/")
+    out_dir <- file.path("output","Immunosuppressors_Oct2026","DE_analysis", paste0(ct, "_between_samples"))
+    dir.create(out_dir, recursive = T, showWarnings = F)
+    write.xlsx(markers, 
+             file = paste0(out_dir,"/", cmp,"_vs_ctrl_",ct,"_DE_markers_", Sys.Date(),".xlsx"))
+    vol <- make_volcano(markers, paste0(cmp, " relative to Control markers: ", ct), fc_threshold = 1)
+    ggsave(paste0("figures/Immunosuppressors_Oct2026/Volcanos/", cmp, "_vs_ctrl_", ct, "_volcano_", Sys.Date(), ".svg"), vol, width = 8, height = 9)
+  }
+}
+FeaturePlot(integrated, features = "Il21", split.by = "sample_type", ncol = 2)
+
+
+# 
+# Idents(integrated) <- "sample_type"
+# ctrl2vs3_TR1.1 <- FindMarkers(integrated[,integrated$predicted.id == "TR1.1"],                
+#                             assay = "RNA",
+#                             slot = "data",
+#                             logfc.threshold = 0.5,
+#                             ident.1 = "Control_2", # ctrl
+#                             ident.2 = "Control_3", # treatment
+#                             test.use = "wilcox", 
+#                             min.cells.group = 25,
+#                             min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+#                             only.pos = FALSE, 
+#                             min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+#                             ) %>% rownames_to_column("gene")
+# write.xlsx(ctrl2vs3_TR1.1, paste0("output/Immunosuppressors_Oct2026/signature_markers/IS_ctrl2_vs_ctrl_3_TR1.1_markers_", Sys.Date(), ".xlsx"))
+
+
+```
+
+
+# volcano plot with signature markers 
+```{r}
+integrated <- qread("data/Immunosuppressors/IS_Oct2026/IS_integrated_lognorm_2026-10-19.qs")
+DefaultAssay(integrated) <- "RNA"
+
+table(integrated$sample_type)
+comparisons <- list(
+  Azathioprine = c("T1_Azathioprine", "Control_1"),
+  Elafibranor = c("T2_Elafibranor", "Control_2"),
+  MMF = c("T3_MMF","Control_3")
+)
+
+# Idents(integrated) <- "predicted.id"
+# sig <-  FindAllMarkers(integrated,
+#                       assay = "RNA",
+#                       test.use = "wilcox",
+#                       slot = "data",
+#                       min.pct = 0.3,
+#                       min.diff.pct = 0.2,
+#                       only.pos = TRUE)
+# write.xlsx(sig, paste0("output/Immunosuppressors_Oct2026/signature_markers/IS_Oct2026_markers_", Sys.Date(), ".xlsx"))
+sig <- read.xlsx("output/Immunosuppressors_Oct2026/signature_markers/IS_Oct2026_markers_2026-10-21.xlsx")
+
+signature_genes_by_type <- split(
+  as.character(sig$gene),
+  as.character(sig$cluster)
+)
+
+signature_genes_by_type <- lapply(signature_genes_by_type, unique)
+signature_lookup <- bind_rows(
+  lapply(names(signature_genes_by_type), function(ct) {
+    tibble(
+      gene = as.character(signature_genes_by_type[[ct]]),
+      signature_type = ct
+    )
+  })
+) %>%
+  distinct(gene, signature_type) %>%
+  group_by(gene) %>%
+  summarise(
+    signature_members = paste(sort(unique(signature_type)), collapse = " / "),
+    signature_type = if (n_distinct(signature_type) == 1L) {
+      dplyr::first(signature_type)
+    } else {
+      "Shared"
+    },
+    .groups = "drop"
+  )
+signature_colors <- c(
+  "TFH"         = "#F8766D",
+  "TR1.1"       = "#7CAE00",
+  "TR1.2"       = "#00BFC4",
+  "Foxp3+TR1.2" = "#C77CFF",
+  "Shared"      = "#988989"
+)
+
+Idents(integrated) <- "sample_type"
+for (ct in unique(integrated$predicted.id)){
+  message("Cell type: ", ct)
+  obj_ct <- integrated[, integrated$predicted.id == ct]
+
+  for (cmp in names(comparisons)){
+    group1 <- comparisons[[cmp]][1]  # treatment
+    group2 <- comparisons[[cmp]][2]  # ctrl
+    message("  Comparison: ", group1, " vs ", group2)
+    
+    markers <- tryCatch({
+                            FindMarkers(obj_ct,
+                            assay = "RNA",
+                            slot = "data",
+                            logfc.threshold = 0.5,
+                            ident.1 = group1, # treatment
+                            ident.2 = group2, # ctrl
+                            test.use = "wilcox", 
+                            min.cells.group = 25,
+                            min.pct = 0.25, # min.pct = the minimum percent of cells in a cluster that expresses a marker (pct.1)
+                            only.pos = FALSE, 
+                            min.diff.pct = 0.1 # minimum difference between pct.1 and pct.2 for each marker
+                            ) %>% rownames_to_column("gene")
+    },
+    error = function(e) {
+    message("  Failed for ", ct, " / ", cmp, ": ", e$message)
+    return(NULL)
+    })
+    if (is.null(markers)) next
+
+    # markers <- markers[order(markers$avg_log2FC, decreasing = TRUE),]
+    # write.csv(file = paste0("output/Expt56/",ct,"_between_samples/",ko,"vs_Cysko_10x_main_",ct,"_markers_between_samples_", Sys.Date(),".csv"),
+    #           markers)
+    # dir.create("output/Immunosuppressors_Oct2026/DE_analysis/")
+    out_dir <- file.path("output","Immunosuppressors_Oct2026","DE_analysis", paste0(ct, "_between_samples"))
+    dir.create(out_dir, recursive = T, showWarnings = F)
+    write.xlsx(markers, 
+             file = paste0(out_dir,"/", cmp,"_vs_ctrl_",ct,"_DE_markers_", Sys.Date(),".xlsx"))
+    
+    # ct_genes <- signature_genes_by_type[[as.character(ct)]]
+    vol <- make_volcano(markers, paste0(cmp, " relative to Control markers: ", ct), 
+                        fc_threshold = 1, genes = ct_genes, top_n = 20,
+                        signature_lookup = signature_lookup,
+                        signature_colors = signature_colors)
+
+    
+    ggsave(paste0("figures/Immunosuppressors_Oct2026/Volcanos/", cmp, "_vs_ctrl_", ct, "_volcano_", Sys.Date(), ".svg"), vol, width = 12, height = 12)
+  }
+}
+
+
+
+```
+
+
+
+
+
+```{r}
+
+sig <- read.xlsx("output/Immunosuppressors_Oct2026/signature_markers/IS_Oct2026_markers_2026-10-21.xlsx")
+
+signature_genes_by_type <- split(
+  as.character(sig$gene),
+  as.character(sig$cluster)
+)
+
+signature_genes_by_type <- lapply(signature_genes_by_type, unique)
+signature_genes_by_type
+signature_results <- list()
+
+
+for (ct in names(signature_genes_by_type)) {
+
+  message("Cell type: ", ct)
+
+  cells_ct <- colnames(integrated)[
+    !is.na(integrated$predicted.id) &
+      integrated$predicted.id == ct
+  ]
+
+  if (length(cells_ct) == 0L) next
+
+  obj_ct <- integrated[, cells_ct]
+
+  genes_ct <- intersect(
+    signature_genes_by_type[[ct]],
+    rownames(obj_ct[["RNA"]])
+  )
+
+  if (length(genes_ct) == 0L) next
+
+  for (cmp in names(comparisons)) {
+
+    treatment <- comparisons[[cmp]][1]
+    control   <- comparisons[[cmp]][2]
+
+    n_treatment <- sum(obj_ct$sample_type == treatment, na.rm = TRUE)
+    n_control   <- sum(obj_ct$sample_type == control, na.rm = TRUE)
+
+    if (min(n_treatment, n_control) < 25) {
+      message("Skipping ", ct, " / ", cmp, ": fewer than 25 cells")
+      next
+    }
+
+    result <- tryCatch(
+      {
+        FindMarkers(
+          object = obj_ct,
+          assay = "RNA",
+          slot = "data",
+          group.by = "sample_type",
+          ident.1 = treatment,
+          ident.2 = control,
+          features = genes_ct,
+          test.use = "wilcox",
+          logfc.threshold = 0,
+          min.pct = 0,
+          min.diff.pct = -Inf,
+          min.cells.group = 25,
+          only.pos = FALSE
+        ) %>%
+          tibble::rownames_to_column("gene") %>%
+          dplyr::mutate(
+            celltype = ct,
+            comparison = cmp,
+            treatment = treatment,
+            control = control,
+            n_treatment = n_treatment,
+            n_control = n_control
+          ) %>%
+          dplyr::select(
+            celltype, gene, comparison, treatment, control,
+            avg_log2FC, p_val, p_val_adj,
+            pct.1, pct.2, n_treatment, n_control
+          )
+      },
+      error = function(e) {
+        message("Failed: ", ct, " / ", cmp, ": ", e$message)
+        NULL
+      }
+    )
+
+    signature_results[[paste(ct, cmp, sep = "_")]] <- result
+  }
+}
+
+signature_de <- dplyr::bind_rows(signature_results)
+write.xlsx(signature_de, paste0("output/Immunosuppressors_Oct2026/signature_markers/comparison_of_sig_markers_treatment_vs_ctrl_", Sys.Date(), ".xlsx"))
+
+signature_de %>%
+  dplyr::filter(
+    gene == "Il10",
+    celltype %in% c("TR1.2", "Foxp3+TR1.2")
+  ) %>%
+  dplyr::select(
+    celltype, comparison,
+    avg_log2FC, p_val, p_val_adj,
+    pct.1, pct.2
+  )
+```
